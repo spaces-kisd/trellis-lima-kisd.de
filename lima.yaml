@@ -1,0 +1,29 @@
+# Lima VM specification for local Trellis development (Ubuntu 24.04, 4 CPUs, 4GiB RAM, virtiofs)
+images:
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+- location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+  arch: "aarch64"
+
+cpus: 4
+memory: "4GiB"
+
+# Mounts are handled by the script now
+mountType: "virtiofs"
+
+provision:
+- mode: system
+  script: |
+    apt-get update
+    apt-get install -y python3 python3-pip ansible php-cli unzip composer git php-xml php-mbstring php-curl
+
+portForwards:
+- guestPort: 80
+  hostIP: "127.0.0.1" # Dynamic: handled by bin/lima
+  hostPort: 80
+- guestPort: 443
+  hostIP: "127.0.0.1" # Dynamic: handled by bin/lima
+  hostPort: 443
+
+ssh:
+  forwardAgent: true

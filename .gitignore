@@ -5,3 +5,5 @@ vendor/roles
 .trellis/*
 !.trellis/cli.yml
 trellis.cli.local.yml
+# Lima/QEMU state. UEFI NVRAM variables (persistent firmware state)
+NvVars

@@ -1,0 +1,79 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Lima: Start Server",
+            "type": "shell",
+            "command": "bin/lima start && xdg-open $(bin/lima url)",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Lima: Stop Server",
+            "type": "shell",
+            "command": "bin/lima stop",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Lima: Restart Server",
+            "type": "shell",
+            "command": "bin/lima restart && xdg-open $(bin/lima url)",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Lima: Rebuild Server",
+            "type": "shell",
+            "command": "bin/lima rebuild && xdg-open $(bin/lima url)",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Lima: Provision",
+            "type": "shell",
+            "command": "bin/lima provision && xdg-open $(bin/lima url)",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Lima: Status",
+            "type": "shell",
+            "command": "bin/lima status",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        },
+                {
+            "label": "Lima: Shell",
+            "type": "shell",
+            "command": "bin/lima shell",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": []
+        }
+    ]
+}
