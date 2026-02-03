@@ -24,12 +24,14 @@ Use the `./bin/lima` helper script to manage the VM. It will automatically check
 
 | Command | Description |
 | :--- | :--- |
+| `./bin/lima init` | **Recommended:** Starts and provisions the VM in one go. |
 | `./bin/lima start` | Starts (or creates) the VM. |
 | `./bin/lima stop` | Stops the VM. |
 | `./bin/lima restart` | Restarts the VM. |
 | `./bin/lima provision` | Runs full Ansible provisioning. |
 | `./bin/lima status` | Shows VM status. |
 | `./bin/lima shell` | Opens a shell inside the VM. |
+| `./bin/lima wp` | Runs WP-CLI commands (e.g., `./bin/lima wp plugin list`). |
 | `./bin/lima url` | Prints the site URL. |
 | `./bin/lima hosts` | Checks `/etc/hosts` entries. |
 | `./bin/lima delete` | Destroys the VM. |
@@ -45,7 +47,8 @@ Run specific Ansible roles (defined in `dev.yml`) to save time:
 *Common tags:* `common`, `fail2ban`, `mariadb`, `php`, `xdebug`, `nginx`, `wordpress`
 
 ### Shell & VS Code
-- **Run Command:** `./bin/lima shell wp plugin list`
+- **Run Command:** `./bin/lima shell ls -la`
+- **WP-CLI:** `./bin/lima wp user list`
 - **VS Code:** Press `Ctrl+Shift+B` to **Run Local Server** (Start/Provision) or **Stop Local Server**.
 
 ## 4. Configuration
@@ -64,8 +67,7 @@ Changes to `lima.yaml` (e.g., `hostIP`) do not apply to existing VMs.
 
 | Script | Description |
 | :--- | :--- |
-| `deploy.sh` | Deploys sites to remote environments (e.g., `./bin/deploy.sh staging example.com`). |
 | `install-lima-on-ubuntu.sh` | Installs `limactl` to `~/.local/bin` (useful for Linux users without root). |
 | `lima` | Main CLI for managing the local development VM. |
+| `manage` | Unified CLI for `deploy`, `provision` (remote), and `vault` operations. |
 | `setup.sh` | Installs Python dependencies and Ansible roles. |
-| `vault.sh` | Wrapper for `ansible-vault` to manage all `vault.yml` files at once. |

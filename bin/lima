@@ -173,21 +173,55 @@ class TrellisLima:
             cmd.extend(extra_args)
         self._run(cmd, check=False)
 
+    def wp(self, *extra_args):
+        """Runs a WP-CLI command inside the VM."""
+        self.shell("wp", *extra_args)
+
     def url(self):
         print(f"http://{self.conf['canonical']}")
 
     def hosts(self):
         """Checks /etc/hosts for correct entries."""
-        try: current = Path("/etc/hosts").read_text()
+        try: lines = Path("/etc/hosts").read_text().splitlines()
         except Exception: return
 
-        missing = [h for h in self.conf['hosts']
-                   if not re.search(rf"^{re.escape(self.conf['ip'])}\s+.*\b{re.escape(h)}\b", current, re.MULTILINE)]
+        existing_hosts = set()
+        ip = self.conf['ip']
+
+        for line in lines:
+            # Strip comments and whitespace
+            line = line.split('#', 1)[0].strip()
+            if not line: continue
+
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == ip:
+                existing_hosts.update(parts[1:])
+
+        # distinct missing hosts
+        missing = []
+        for h in self.conf['hosts']:
+             if h not in existing_hosts and h not in missing:
+                 missing.append(h)
 
         if missing:
-            print(f"\n\033[93m[!] Missing /etc/hosts entries. Please run:\033[0m")
+            print(f"\n\033[93m[!] Missing /etc/hosts entries for IP {self.conf['ip']}:\033[0m")
             for h in missing:
-                print(f"  echo '{self.conf['ip']} {h}' | sudo tee -a /etc/hosts")
+                print(f"  - {h}")
+
+            if input("\nUpdate /etc/hosts automatically? (sudo required) [y/N] ").lower() == 'y':
+                try:
+                    for h in missing:
+                        self._run(['sudo', 'sh', '-c', f"echo '{self.conf['ip']} {h}' >> /etc/hosts"], check=True)
+                    print("✓ /etc/hosts updated.")
+                except subprocess.CalledProcessError:
+                    print(f"\n\033[91m[!] Failed to update /etc/hosts automatically.\033[0m")
+                    print("Please run manually:")
+                    for h in missing:
+                        print(f"  echo '{self.conf['ip']} {h}' | sudo tee -a /etc/hosts")
+            else:
+                print("\nPlease run manually:")
+                for h in missing:
+                    print(f"  echo '{self.conf['ip']} {h}' | sudo tee -a /etc/hosts")
             print("")
         else:
              if len(sys.argv) > 1 and sys.argv[1] == 'hosts':
@@ -225,9 +259,15 @@ class TrellisLima:
 
             res = subprocess.run(['ip', 'addr', 'show', 'dev', 'lo'], capture_output=True, text=True)
             if self.conf['ip'] not in res.stdout:
-                print(f"\n\033[93m[!] Error: Host IP {self.conf['ip']} not found on 'lo' interface.\033[0m")
-                print(f"  Run: sudo ip addr add {self.conf['ip']}/32 dev lo\n")
-                sys.exit(1)
+                print(f"\n\033[93m[!] Host IP {self.conf['ip']} not found on 'lo' interface.\033[0m")
+                print(f"Attempting to add {self.conf['ip']} to 'lo' interface...")
+                try:
+                    subprocess.run(['sudo', 'ip', 'addr', 'add', f"{self.conf['ip']}/32", 'dev', 'lo'], check=True)
+                    print("✓ IP address added.")
+                except subprocess.CalledProcessError:
+                    print(f"\n\033[91m[!] Failed to add IP address.\033[0m")
+                    print(f"  Please run manually: sudo ip addr add {self.conf['ip']}/32 dev lo\n")
+                    sys.exit(1)
 
         # 2. Check Status & Reconcile Config
         status = self._get_status()
@@ -244,6 +284,7 @@ class TrellisLima:
             if status == "Running":
                 if sys.argv[1] == 'start':
                     print(f"VM '{self.vm_name}' is already running.")
+                    self.hosts()
                     self._check_provision_status()
                 return
 
@@ -293,6 +334,12 @@ class TrellisLima:
             "-e", f"web_user={ssh['user']}",
             "-e", f"web_group={ssh['user']}"
         ]
+
+        vault_pass = TRELLIS_DIR / ".vault_pass"
+        if vault_pass.exists():
+            cmd.extend(["--vault-password-file", ".vault_pass"])
+        else:
+            print(f"\n\033[93m[!] Warning: .vault_pass not found. Vault secrets (if any) cannot be decrypted.\033[0m")
 
         if extra_args:
             cmd.extend(extra_args)
