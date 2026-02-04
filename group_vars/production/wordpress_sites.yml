@@ -3,21 +3,36 @@
 # Define accompanying passwords/secrets in group_vars/production/vault.yml
 
 wordpress_sites:
-  example.com:
+  kisd.de:
     site_hosts:
-      - canonical: example.com
+      - canonical: kisd.de
         redirects:
-          - www.example.com
+          - www.kisd.de
     local_path: ../site # path targeting local Bedrock site directory (relative to Ansible root)
-    repo: git@github.com:example/example.com.git # replace with your Git repo URL
-    repo_subtree_path: site # relative path to your Bedrock/WP directory in your repo
+    repo: git@github.com:spaces-kisd/kisd.de
+    # repo_subtree_path: site # relative path to your Bedrock/WP directory in your repo
     branch: main
     multisite:
       enabled: false
-    ssl:
-      enabled: false
-      provider: letsencrypt
-    cache:
-      enabled: false
+
+    # Disable for now.
     xmlrpc:
       enabled: false
+
+    # 1. SSL Configuration
+    # We must use self-signed because the proxy handles the public DNS.
+    # The proxy connects to Trellis via port 443, so SSL must be enabled here.
+    ssl:
+      enabled: true
+      provider: self-signed
+
+    # 2. Cache Configuration
+    # Disable FastCGI caching if the upstream proxy handles caching,
+    # otherwise, leave enabled.
+    cache:
+      enabled: true
+
+    # 3. Nginx Includes
+    # We need to tell Nginx to trust the proxy's IP address.
+    nginx_includes:
+      - { name: proxy-settings, template: nginx-includes/all/proxy-trust.conf.j2 }
