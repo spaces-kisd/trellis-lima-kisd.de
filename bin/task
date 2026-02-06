@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import subprocess
+import re
+import argparse
+import tempfile
+import shlex
+import shutil
+import json
+import difflib
+from pathlib import Path
+
+# --- Configuration & Constants ---
+
+BIN_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = BIN_DIR.parent
+VENV_DIR = PROJECT_ROOT / ".trellis" / "virtualenv"
+VAULT_PASS_FILE = PROJECT_ROOT / ".vault_pass"
+PROVISION_MARKER = PROJECT_ROOT / ".trellis" / "provisioned"
+
+# --- Bootstrap & Utils ---
+
+def ensure_venv():
+    """Ensures the script is running within the project's virtual environment."""
+    if os.name == "nt":
+        venv_python = VENV_DIR / "Scripts" / "python.exe"
+    else:
+        venv_python = VENV_DIR / "bin" / "python"
+
+    if sys.executable == str(venv_python):
+        return
+
+    if venv_python.exists():
+        os.environ["PATH"] = f"{venv_python.parent}{os.pathsep}{os.environ.get('PATH', '')}"
+        os.environ["VIRTUAL_ENV"] = str(VENV_DIR)
+        try:
+            os.execv(str(venv_python), [str(venv_python)] + sys.argv)
+        except OSError as e:
+            sys.exit(f"❌ Error re-executing in venv: {e}")
+    else:
+        sys.exit(f"❌ Error: Virtual environment not found at {VENV_DIR}\n   Run `./bin/setup.sh` first.")
+
+# Run bootstrap immediately
+ensure_venv()
+import yaml
+
+def run_command(cmd, cwd=PROJECT_ROOT, env=None, capture=False, check=True):
+    """Unified wrapper for subprocess.run."""
+    run_env = env or os.environ.copy()
+
+    if not capture:
+        cmd_str = shlex.join(str(c) for c in cmd) if isinstance(cmd, list) else cmd
+        print(f"🚀 Running: {cmd_str}")
+
+    try:
+        use_shell = isinstance(cmd, str)
+        return subprocess.run(
+            cmd, cwd=cwd, env=run_env, check=check,
+            text=True, shell=use_shell, capture_output=capture
+        )
+    except subprocess.CalledProcessError as e:
+        if not capture:
+            print(f"\n🚫 Failed (Exit {e.returncode})")
+            if e.stderr: print(e.stderr)
+        if check:
+            sys.exit(e.returncode)
+        raise e
+
+def confirm(message):
+    print(f"⚠️  {message}")
+    try:
+        if input("   Are you sure you want to continue? [y/N] ").lower() != 'y':
+            sys.exit("🚫 Aborted.")
+    except EOFError:
+        sys.exit(1)
+
+# --- Local VM Manager (Lima) ---
+
+class LimaManager:
+    def __init__(self):
+        if not shutil.which("limactl"):
+            sys.exit("❌ Error: 'limactl' not installed.")
+        self.conf = self._load_config()
+        self.vm_name = self.conf['canonical']
+
+    def _load_config(self):
+        site_yml = PROJECT_ROOT / "group_vars" / "development" / "wordpress_sites.yml"
+        if not site_yml.exists(): sys.exit(f"❌ Missing: {site_yml}")
+
+        with open(site_yml) as f:
+            sites = yaml.safe_load(f).get('wordpress_sites', {})
+
+        if not sites: sys.exit("❌ No sites in wordpress_sites.yml")
+
+        key, data = next(iter(sites.items()))
+        hosts = [h['canonical'] for h in data.get('site_hosts', [])]
+
+        ip = "127.0.0.1"
+        hosts_file = PROJECT_ROOT / "hosts" / "development"
+        if hosts_file.exists():
+            match = re.search(r"^([0-9.]+)", hosts_file.read_text(), re.MULTILINE)
+            if match: ip = match.group(1)
+
+        local_path = (PROJECT_ROOT / data.get('local_path', '../site')).resolve()
+
+        return {
+            'key': key, 'canonical': hosts[0], 'hosts': hosts, 'ip': ip,
+            'path': local_path
+        }
+
+    def _get_status(self):
+        res = run_command(["limactl", "list", self.vm_name, "--json"], capture=True, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            try:
+                for line in res.stdout.splitlines():
+                    info = json.loads(line)
+                    if info.get("name") == self.vm_name:
+                        return info.get("status")
+            except json.JSONDecodeError: pass
+        return None
+
+    def _build_lima_config(self):
+        lima_cfg = PROJECT_ROOT / "lima.yaml"
+        if not lima_cfg.exists(): sys.exit("❌ lima.yaml missing")
+
+        with open(lima_cfg) as f: cfg = yaml.safe_load(f)
+
+        cfg.setdefault('mounts', []).extend([
+            {'location': str(PROJECT_ROOT), 'writable': True},
+            {'location': str(self.conf['path']), 'mountPoint': f"/srv/www/{self.conf['key']}/current", 'writable': True}
+        ])
+
+        if 'portForwards' in cfg:
+            for pf in cfg['portForwards']:
+                if 'hostIP' in pf: pf['hostIP'] = self.conf['ip']
+        return cfg
+
+    def start(self):
+        if sys.platform == "linux":
+             sysctl_path = "/proc/sys/net/ipv4/ip_unprivileged_port_start"
+             if os.path.exists(sysctl_path):
+                 try:
+                     with open(sysctl_path, 'r') as f:
+                        if int(f.read().strip()) > 80:
+                            print("\n⚠️  Privileged port access blocked.")
+                            print("   Run: echo 'net.ipv4.ip_unprivileged_port_start=80' | sudo tee /etc/sysctl.d/50-lima-ports.conf && sudo sysctl --system\n")
+                            sys.exit(1)
+                 except ValueError: pass
+
+        status = self._get_status()
+        if status == "Running":
+            print(f"✅ VM '{self.vm_name}' is already running.")
+            self.hosts()
+            return
+
+        print(f"✨ Starting '{self.vm_name}'...")
+        if status is None:
+            cfg = self._build_lima_config()
+            with tempfile.NamedTemporaryFile('w', suffix='.yaml', delete=False) as tmp:
+                yaml.dump(cfg, tmp)
+                tmp_path = tmp.name
+            try:
+                run_command(["limactl", "start", tmp_path, "--tty=false", "--name", self.vm_name])
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+        else:
+            run_command(["limactl", "start", self.vm_name])
+
+        self.hosts()
+
+    def stop(self):
+        if self._get_status() == "Running":
+            run_command(["limactl", "stop", self.vm_name])
+        else:
+            print(f"ℹ️  VM '{self.vm_name}' is not running.")
+
+    def delete(self, force=False):
+        if not force: confirm(f"Delete VM '{self.vm_name}'?")
+        cmd = ["limactl", "delete", self.vm_name]
+        if force: cmd.append("--force")
+        run_command(cmd, check=not force)
+        if PROVISION_MARKER.exists(): PROVISION_MARKER.unlink()
+
+    def shell(self, extra_args):
+        workdir = f"/srv/www/{self.conf['key']}/current"
+        cmd = ["limactl", "shell", "--workdir", workdir, self.vm_name]
+        if extra_args: cmd.extend(extra_args)
+        run_command(cmd, check=False)
+
+    def provision(self):
+        self.start()
+        res = run_command(["limactl", "list", self.vm_name, "--json"], capture=True)
+        try:
+            data = json.loads(res.stdout.splitlines()[0])
+            port = data.get("sshLocalPort")
+        except: sys.exit("❌ Error: Could not determine SSH port. Is VM running?")
+
+        user = os.environ.get("USER")
+        key_path = Path.home() / ".lima" / "_config" / "user"
+
+        cmd = [
+            "ansible-playbook", "dev.yml",
+            "-e", f"ansible_port={port}",
+            "-e", "ansible_host=127.0.0.1",
+            "-e", f"ansible_user={user}",
+            "-e", f"ansible_ssh_private_key_file={key_path}",
+            "-e", f"web_user={user}",
+            "-e", f"web_group={user}"
+        ]
+        if VAULT_PASS_FILE.exists(): cmd.extend(["--vault-password-file", ".vault_pass"])
+
+        env = os.environ.copy()
+        env['ANSIBLE_HOST_KEY_CHECKING'] = "False"
+        print("🛠️  Provisioning local development environment...")
+        run_command(cmd, env=env)
+        PROVISION_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        PROVISION_MARKER.touch()
+
+    def hosts(self):
+        try: lines = Path("/etc/hosts").read_text().splitlines()
+        except Exception: return
+        ip = self.conf['ip']
+        existing = set()
+        for line in lines:
+            if not line.strip() or line.strip().startswith('#'): continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] == ip: existing.update(parts[1:])
+
+        missing = [h for h in self.conf['hosts'] if h not in existing]
+        if missing:
+            print(f"\n⚠️  Missing /etc/hosts entries for IP {ip}:")
+            for h in missing: print(f"  - {h}")
+            print("\nPlease run manually:")
+            for h in missing: print(f"  echo '{ip} {h}' | sudo tee -a /etc/hosts")
+            print("")
+        else:
+             print(f"✅ Hosts file entries correct for IP {ip}")
+
+# --- Remote Environment Managers ---
+
+def get_environments():
+    hosts_dir = PROJECT_ROOT / "hosts"
+    if not hosts_dir.exists(): return []
+    return [f.name for f in hosts_dir.iterdir() if f.is_file() and not f.name.startswith('.')]
+
+def get_sites(environment):
+    sites_file = PROJECT_ROOT / "group_vars" / environment / "wordpress_sites.yml"
+    if not sites_file.exists(): return []
+    try:
+        with open(sites_file) as f:
+            data = yaml.safe_load(f)
+            return list(data.get('wordpress_sites', {}).keys())
+    except: return []
+
+def handle_remote_deploy(args, extra):
+    site = args.site
+    available = get_sites(args.environment)
+
+    if not site:
+        if len(available) == 1:
+            site = available[0]
+            print(f"✨ Auto-detected site: {site}")
+        else:
+            sys.exit(f"❌ Error: Please specify a site. Available: {available}")
+
+    confirm(f"Deploy '{site}' to '{args.environment}'?")
+    cmd = ["ansible-playbook", "deploy.yml", "-e", f"env={args.environment}", "-e", f"site={site}"]
+    if VAULT_PASS_FILE.exists(): cmd.extend(["--vault-password-file", str(VAULT_PASS_FILE)])
+    cmd.extend(extra)
+    run_command(cmd)
+
+def handle_remote_provision(args, extra):
+    confirm(f"PROVISION the '{args.environment}' environment?")
+    cmd = ["ansible-playbook", "server.yml", "-e", f"env={args.environment}"]
+    if VAULT_PASS_FILE.exists(): cmd.extend(["--vault-password-file", str(VAULT_PASS_FILE)])
+    cmd.extend(extra)
+    run_command(cmd)
+
+def handle_vault(args, extra):
+    files = list((PROJECT_ROOT / "group_vars").glob("**/vault.yml"))
+    cmd = ["ansible-vault", args.vault_command]
+    if VAULT_PASS_FILE.exists(): cmd.extend(["--vault-password-file", str(VAULT_PASS_FILE)])
+    if not any(not a.startswith('-') for a in extra):
+        if not extra: cmd.extend([str(f) for f in files])
+    cmd.extend(extra)
+    run_command(cmd)
+
+# --- CLI Entry Point ---
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="bin/task",
+        description="Task Runner for Trellis projects (Local VM & Remote Servers).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        usage="bin/task <command> [options]"
+    )
+
+    subparsers = parser.add_subparsers(dest="command", required=True, title="Commands", metavar="")
+
+    # --- 1. VM Namespace ---
+    vm_parser = subparsers.add_parser(
+        "vm",
+        help="Manage local Lima VM (start, stop, shell, wp...)",
+        usage="bin/task vm [action] ..."
+    )
+    vm_subs = vm_parser.add_subparsers(dest="vm_action", required=True, title="Actions", metavar="")
+
+    vm_subs.add_parser("start", help="Start the VM")
+    vm_subs.add_parser("stop", help="Stop the VM")
+    vm_subs.add_parser("restart", help="Restart the VM")
+    vm_subs.add_parser("delete", help="Delete the VM")
+    vm_subs.add_parser("provision", help="Provision the local VM (run ansible)")
+
+    shell_p = vm_subs.add_parser("shell", help="Open shell in VM")
+    shell_p.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run inside VM")
+
+    wp_p = vm_subs.add_parser("wp", help="Run WP-CLI in VM")
+    wp_p.add_argument("args", nargs=argparse.REMAINDER, help="WP-CLI arguments")
+
+    # --- 2. Remote Namespace ---
+    remote_parser = subparsers.add_parser(
+        "remote",
+        help="Manage remote servers (deploy, provision)",
+        usage="bin/task remote [action] [env] ..."
+    )
+    remote_subs = remote_parser.add_subparsers(dest="remote_action", required=True, title="Actions", metavar="")
+
+    deploy_parser = remote_subs.add_parser("deploy", help="Deploy site to remote")
+    deploy_parser.add_argument("environment", choices=get_environments(), help="Target environment")
+    deploy_parser.add_argument("site", nargs='?', help="Site name (optional)")
+
+    prov_parser = remote_subs.add_parser("provision", help="Provision remote server")
+    prov_parser.add_argument("environment", choices=get_environments(), help="Target environment")
+
+    # --- 3. Vault Namespace ---
+    vault_parser = subparsers.add_parser(
+        "vault",
+        help="Ansible Vault operations (encrypt, decrypt, edit...)",
+        usage="bin/task vault [command] [file...]"
+    )
+    vault_parser.add_argument("vault_command", help="Action (encrypt, decrypt, view, edit, rekey)")
+
+    # --- Parse ---
+    args, extra = parser.parse_known_args()
+
+    # Route Commands
+    if args.command == "vm":
+        manager = LimaManager()
+        if args.vm_action == "start": manager.start()
+        elif args.vm_action == "stop": manager.stop()
+        elif args.vm_action == "restart":
+            manager.stop()
+            manager.start()
+        elif args.vm_action == "delete": manager.delete()
+        elif args.vm_action == "provision": manager.provision()
+        elif args.vm_action == "shell": manager.shell(args.cmd)
+        elif args.vm_action == "wp": manager.shell(["wp"] + args.args)
+
+    elif args.command == "remote":
+        if args.remote_action == "deploy":
+            handle_remote_deploy(args, extra)
+        elif args.remote_action == "provision":
+            handle_remote_provision(args, extra)
+
+    elif args.command == "vault":
+        handle_vault(args, extra)
+
+if __name__ == "__main__":
+    main()
